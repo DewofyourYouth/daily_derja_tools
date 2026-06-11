@@ -8,20 +8,33 @@ defmodule Mix.Tasks.Derja.Tts do
 
   Usage:
 
-      mix derja.tts examples/word_examples.csv
-      mix derja.tts examples/word_examples.csv --out /absolute/path/to/static/audio
+      mix derja.tts examples/daif-examples.csv
+      mix derja.tts examples/daif-examples.csv --out /absolute/path/to/static/audio
 
   Required environment variables:
 
       ELEVENLABS_API_KEY
-      ELEVENLABS_MALE_VOICE_ID
-      ELEVENLABS_FEMALE_VOICE_ID
+      ELEVENLABS_MALE_VOICE_ID            # Shami (Levantine) male voice
+      ELEVENLABS_FEMALE_VOICE_ID          # Shami (Levantine) female voice
+      ELEVENLABS_TUNISIAN_MALE_VOICE_ID   # Tunisian male voice
+      ELEVENLABS_TUNISIAN_FEMALE_VOICE_ID # Tunisian female voice
 
   CSV format:
 
-      slug,voice,text,en
-      daai-01,female,"ما في داعي تصبغي شعرك، طالع حلو هيك.","No need to dye your hair; it looks nice like this."
-      daai-02,male,"ما في داعي تعتذر، ما صار شي.","No need to apologize; nothing happened."
+      slug,voice,text,en,post,dialect
+      hadid,male,حَديد,"iron; metal",iron,both
+      strike-iron-hot,male,"إضرب الحديد وهو حامي.","Strike the iron while it's hot.",iron,shami
+      narqod,male,نَرْقُد,"I sleep; I go to sleep",tunisian-daily-2,tunisian
+
+  Columns:
+
+    * `slug`    - output file name (without extension); audio is written to `<slug>.mp3`
+    * `voice`   - `male` or `female`
+    * `text`    - the Arabic text to synthesize
+    * `en`      - English gloss/translation (metadata only; not sent to TTS)
+    * `post`    - the post the example belongs to (metadata only)
+    * `dialect` - `shami`, `tunisian`, or `both`; selects the voice to use.
+                  `both` uses the Shami voice.
   """
 
   NimbleCSV.define(DailyDerjaCSV, separator: ",", escape: "\"")
@@ -67,8 +80,14 @@ defmodule Mix.Tasks.Derja.Tts do
     api_key = get_env!("ELEVENLABS_API_KEY")
 
     voices = %{
-      "male" => get_env!("ELEVENLABS_MALE_VOICE_ID"),
-      "female" => get_env!("ELEVENLABS_FEMALE_VOICE_ID")
+      "shami" => %{
+        "male" => get_env!("ELEVENLABS_MALE_VOICE_ID"),
+        "female" => get_env!("ELEVENLABS_FEMALE_VOICE_ID")
+      },
+      "tunisian" => %{
+        "male" => get_env!("ELEVENLABS_TUNISIAN_MALE_VOICE_ID"),
+        "female" => get_env!("ELEVENLABS_TUNISIAN_FEMALE_VOICE_ID")
+      }
     }
 
     File.mkdir_p!(output_dir)
@@ -76,8 +95,7 @@ defmodule Mix.Tasks.Derja.Tts do
     rows =
       csv_path
       |> File.read!()
-      |> DailyDerjaCSV.parse_string(skip_headers: false)
-      |> rows_to_maps()
+      |> parse_rows()
 
     Mix.shell().info("Parsed #{length(rows)} row(s).")
 
@@ -86,6 +104,34 @@ defmodule Mix.Tasks.Derja.Tts do
     end)
 
     Mix.shell().info("Done.")
+  end
+
+  @doc """
+  Parse a CSV string (with headers) into a list of string-keyed maps,
+  trimming whitespace from every header and value.
+  """
+  def parse_rows(csv_string) when is_binary(csv_string) do
+    csv_string
+    |> DailyDerjaCSV.parse_string(skip_headers: false)
+    |> rows_to_maps()
+  end
+
+  @doc """
+  Resolve the ElevenLabs voice id for a given `dialect` and `voice`.
+
+  `dialect` is one of `"shami"`, `"tunisian"`, or `"both"` (which maps to the
+  Shami voices). `voice` is `"male"` or `"female"`. Returns `nil` when no voice
+  id is configured for the combination.
+  """
+  def voice_id_for(voices, dialect, voice) do
+    dialect_key =
+      case normalize(dialect) do
+        "tunisian" -> "tunisian"
+        # "shami", "both", and anything else fall back to the Shami voices.
+        _ -> "shami"
+      end
+
+    get_in(voices, [dialect_key, normalize(voice)])
   end
 
   defp rows_to_maps([]), do: []
@@ -103,18 +149,20 @@ defmodule Mix.Tasks.Derja.Tts do
   end
 
   defp generate_row!(
-         %{"slug" => slug, "voice" => voice, "text" => text},
+         %{"slug" => slug, "voice" => voice, "text" => text, "dialect" => dialect},
          api_key,
          voices,
          output_dir
        ) do
     slug = String.trim(slug)
-    voice = voice |> String.trim() |> String.downcase()
     text = String.trim(text)
 
     voice_id =
-      Map.get(voices, voice) ||
-        Mix.raise("Unknown voice '#{voice}' for slug '#{slug}'. Use male or female.")
+      voice_id_for(voices, dialect, voice) ||
+        Mix.raise(
+          "No voice id for dialect '#{dialect}' / voice '#{voice}' (slug '#{slug}'). " <>
+            "Use voice male or female and dialect shami, tunisian, or both."
+        )
 
     output_path = Path.join(output_dir, "#{slug}.mp3")
 
@@ -140,7 +188,7 @@ defmodule Mix.Tasks.Derja.Tts do
 
     Expected columns:
 
-        slug,voice,text,en
+        slug,voice,text,en,post,dialect
 
     Got:
 
@@ -181,6 +229,9 @@ defmodule Mix.Tasks.Derja.Tts do
     end
   end
 
+  defp normalize(value) when is_binary(value), do: value |> String.trim() |> String.downcase()
+  defp normalize(value), do: value
+
   defp get_env!(name) do
     System.get_env(name) ||
       Mix.raise("Missing required environment variable: #{name}")
@@ -190,7 +241,12 @@ defmodule Mix.Tasks.Derja.Tts do
     env_path = Path.expand(".env", File.cwd!())
 
     if Code.ensure_loaded?(Dotenvy) and File.exists?(env_path) do
-      Dotenvy.source!(env_path)
+      # Dotenvy.source!/1 returns a map but does NOT mutate the system
+      # environment, so push the parsed values into it ourselves. Existing
+      # system env vars still win, since Dotenvy overlays them onto the file.
+      env_path
+      |> Dotenvy.source!()
+      |> System.put_env()
     end
   rescue
     _ ->
