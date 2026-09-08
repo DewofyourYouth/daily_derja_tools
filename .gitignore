@@ -21,7 +21,9 @@ erl_crash.dump
 
 # Ignore package tarball (built via "mix hex.build").
 daily_derja_tools-*.tar
-
+examples
+static
 .env
 .env.*
 !.env.example
+.DS_Store

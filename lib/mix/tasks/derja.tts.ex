@@ -10,6 +10,8 @@ defmodule Mix.Tasks.Derja.Tts do
 
       mix derja.tts examples/daif-examples.csv
       mix derja.tts examples/daif-examples.csv --out /absolute/path/to/static/audio
+      mix derja.tts examples/daif-examples.csv --speed 0.8
+      mix derja.tts examples/shami_2026-08-16b_audio.csv --by-lesson
 
   Required environment variables:
 
@@ -35,11 +37,20 @@ defmodule Mix.Tasks.Derja.Tts do
     * `post`    - the post the example belongs to (metadata only)
     * `dialect` - `shami`, `tunisian`, or `both`; selects the voice to use.
                   `both` uses the Shami voice.
+
+  Options:
+
+    * `--speed`     - ElevenLabs playback speed, from 0.7 (slowest) to 1.2
+                      (fastest). Defaults to 0.75.
+    * `--by-lesson` - write audio to `examples/<csv basename>/` (named after
+                      the input CSV file) instead of the default output
+                      directory. Ignored if `--out` is also given.
   """
 
   NimbleCSV.define(DailyDerjaCSV, separator: ",", escape: "\"")
 
   @default_output_dir "static/audio"
+  @default_speed 0.75
   @model_id "eleven_multilingual_v2"
 
   @impl Mix.Task
@@ -50,12 +61,18 @@ defmodule Mix.Tasks.Derja.Tts do
 
     {opts, positional, invalid} =
       OptionParser.parse(args,
-        switches: [out: :string],
+        switches: [out: :string, speed: :float, by_lesson: :boolean],
         aliases: [o: :out]
       )
 
     if invalid != [] do
       Mix.raise("Invalid arguments: #{inspect(invalid)}")
+    end
+
+    speed = Keyword.get(opts, :speed, @default_speed)
+
+    if speed < 0.7 or speed > 1.2 do
+      Mix.raise("Invalid --speed #{speed}: must be between 0.7 and 1.2.")
     end
 
     csv_path =
@@ -72,10 +89,22 @@ defmodule Mix.Tasks.Derja.Tts do
           """)
       end
 
-    output_dir = Keyword.get(opts, :out, @default_output_dir)
+    output_dir =
+      case Keyword.get(opts, :out) do
+        nil ->
+          if Keyword.get(opts, :by_lesson, false) do
+            Path.join("examples", Path.basename(csv_path, ".csv"))
+          else
+            @default_output_dir
+          end
+
+        out ->
+          out
+      end
 
     Mix.shell().info("CSV path: #{csv_path}")
     Mix.shell().info("Output dir: #{Path.expand(output_dir)}")
+    Mix.shell().info("Speed: #{speed}")
 
     api_key = get_env!("ELEVENLABS_API_KEY")
 
@@ -100,7 +129,7 @@ defmodule Mix.Tasks.Derja.Tts do
     Mix.shell().info("Parsed #{length(rows)} row(s).")
 
     Enum.each(rows, fn row ->
-      generate_row!(row, api_key, voices, output_dir)
+      generate_row!(row, api_key, voices, output_dir, speed)
     end)
 
     Mix.shell().info("Done.")
@@ -152,7 +181,8 @@ defmodule Mix.Tasks.Derja.Tts do
          %{"slug" => slug, "voice" => voice, "text" => text, "dialect" => dialect},
          api_key,
          voices,
-         output_dir
+         output_dir,
+         speed
        ) do
     slug = String.trim(slug)
     text = String.trim(text)
@@ -175,14 +205,15 @@ defmodule Mix.Tasks.Derja.Tts do
         generate_tts!(
           api_key: api_key,
           voice_id: voice_id,
-          text: text
+          text: text,
+          speed: speed
         )
 
       File.write!(output_path, audio)
     end
   end
 
-  defp generate_row!(row, _api_key, _voices, _output_dir) do
+  defp generate_row!(row, _api_key, _voices, _output_dir, _speed) do
     Mix.raise("""
     Bad CSV row.
 
@@ -196,7 +227,7 @@ defmodule Mix.Tasks.Derja.Tts do
     """)
   end
 
-  defp generate_tts!(api_key: api_key, voice_id: voice_id, text: text) do
+  defp generate_tts!(api_key: api_key, voice_id: voice_id, text: text, speed: speed) do
     url = "https://api.elevenlabs.io/v1/text-to-speech/#{voice_id}"
 
     body = %{
@@ -204,7 +235,8 @@ defmodule Mix.Tasks.Derja.Tts do
       model_id: @model_id,
       voice_settings: %{
         stability: 0.45,
-        similarity_boost: 0.8
+        similarity_boost: 0.8,
+        speed: speed
       }
     }
 
